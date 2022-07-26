@@ -1,0 +1,547 @@
+---
+title: "Fit a skew-normal distribution to DNA fraction deistribution"
+author: "Roey Angel"
+email: "roey.angel@bc.cas.cz"
+date: "`r Sys.Date()`"
+output:
+  rmarkdown::html_document:
+    code_folding: show
+    dev: png
+    df_print: kable
+    fig_caption: yes
+    highlight: pygments
+    keep_md: yes
+    number_sections: no
+    theme: flatly
+    toc: yes
+    toc_depth: 5
+    toc_float: yes
+  html_document:
+    df_print: paged
+    toc: yes
+    toc_depth: '5'
+link-citations: yes
+csl: fems-microbiology-ecology.csl
+subtitle: ""
+---
+
+```{r libraries, include=F}
+library(tidyverse) # Easily Install and Load the 'Tidyverse', CRAN v1.3.1
+library(extrafont) # Tools for using fonts, CRAN v0.17
+library(kableExtra) # Construct Complex Table with 'kable' and Pipe Syntax, CRAN v1.3.4
+library(knitr) # A General-Purpose Package for Dynamic Report Generation in R, CRAN v1.33
+library(magrittr) # A Forward-Pipe Operator for R, CRAN v2.0.1
+library(sn) # The Skew-Normal and Related Distributions Such as the Skew-t and the SUN, CRAN v2.0.0
+library(patchwork) # The Composer of Plots, CRAN v1.1.1
+library(svglite) # An 'SVG' Graphics Device, CRAN v2.0.0
+```
+
+```{r style settings, include=F}
+options(width = 90, knitr.table.format = "html")
+opts_chunk$set(
+  warning = FALSE,
+  message = FALSE,
+  cache = TRUE,
+  dev = "png",
+  fig.ext = "png",
+  dpi = 600,
+#  fig.width = 12,
+#  fig.height = 8,
+  cache.path = "Fit_selm_cache/",
+  fig.path = "Fit_selm_figs/"
+)
+f_name <- "DejaVu Sans" #sub("\\s//", "", f_name)
+f_size <- 10
+font_import(pattern = "DejaVuSans", prompt = FALSE)
+loadfonts() # registers fonts
+theme_set(theme_bw(base_size = f_size, base_family = f_name))
+```
+
+## Functions
+```{r functions, include=T}
+bp2kbp <- function() {
+    function(x) format(x/1000,digits = 2) 
+}
+
+plot_fitted_dist <- function(frag_sizes = DNA_frags, mode_sample = rsamp1){
+  ggplot() +
+    geom_point(data = frag_sizes, aes(x = `Fragment size (bp)`, y = Intensity, colour = "Data")) +
+    geom_freqpoly(data = mode_sample, aes(x = sn, colour = "Model fit SN")) +
+    # geom_freqpoly(data = rsamp2, aes(x = st, colour = "Model fit ST")) +
+    # geom_freqpoly(data = rsamp3, aes(x = sn, colour = "Model fit SN log")) +
+    # geom_freqpoly(data = rsamp4, aes(x = st, colour = "Model fit ST log")) +
+    # geom_freqpoly(data = rsamp_guess, aes(x = gs, colour = "Guess")) +
+    scale_x_log10(limits = c(300, 60000), labels = bp2kbp()) +
+    scale_colour_manual(name = "", breaks = c("Data","Model fit SN", "Model fit ST", "Model fit SN log", "Model fit ST log", "Guess"),
+                        values = c("Data" = "black",
+                                   "Model fit SN" = "red",
+                                   "Model fit SN log" = "blue",
+                                   "Model fit ST" = "green",
+                                   "Model fit ST log" = "Orange",
+                                   "Guess" = "gray")) +
+    theme(legend.position = c(0.15, 0.95), 
+          plot.title = element_text(color = "black", size = 12, hjust = 0.5, face = "bold"),
+          legend.background = element_blank()) +
+    labs(x = "Fragment size (kbp)")
+    
+    
+     # labs(colour = "")
+    # theme(legend.position = "none")
+}
+
+# convert svg to svgz
+gz <- function (in_path, out_path = tempfile()) 
+{
+    out <- gzfile(out_path, "w")
+    writeLines(readLines(in_path), out)
+    close(out)
+    file.remove(in_path)
+    invisible(out_path)
+}
+```
+
+# Model the distribution parameters of DNA fragments from environmental samples using the skew-normal distribution
+
+## Set DNA fraction sizes
+```{r set general parameters, cashe=T}
+rel_path <- "../Agilent_tape_station/2020-07-13 - 18-32-37_Angel-gDNA/"
+
+# Set fragment sizes manually according to selected regions because GetData Graph Digitizer cannot handle a log x-axis well
+read_csv(paste0(rel_path, "2020-07-13 - 18-32-37_Angel-gDNA_regionTable.csv"), 
+         skip = 2,
+         col_names = FALSE, 
+         n_max = 31) %>% 
+  select(X1, X2) %>% 
+  pivot_longer(X1:X2, values_to = "Fragment size (bp)") %>% 
+  pull(`Fragment size (bp)`) -> 
+  Fragment_sizes
+
+dist_params <- tibble(Sample = character(),
+                      mean = numeric(),
+                      s.d. = numeric(),
+                      gamma1 = numeric(),
+                      xi = numeric(),
+                      omega = numeric(),
+                      alpha = numeric())
+
+
+N <- 10000 # n points to sample for plotting
+```
+
+## Temperate forest soil I (Bohemian Forest)
+```{r B1 Sumava 1, cache=T}
+# this_max <- 6950 # maximum of peak (if recorded)
+# Manual_fragment_sizes_many %>% append(., this_max, after = sum(this_max > .)) -> Fragment_sizes
+Sample_name <- "Bohemian Forest soil I"
+read_table(paste0(rel_path, "2020-07-13 - 18.32.37_Angel_B1_regions.txt"),
+           col_names = c("Fragment size (bp)", "Intensity"), 
+           skip = 4) %>% 
+  mutate(Intensity = round(Intensity)) -> # weights in selm must be integers
+  DNA_frags
+
+DNA_frags$`Fragment size (bp)` <- Fragment_sizes 
+DNA_frags %>% glimpse
+
+DNA_frags %<>% filter(., `Fragment size (bp)` > 350)
+DNA_frags %<>% filter(., `Fragment size (bp)` < 50000)
+# DNA_frags %<>% bind_cols(., `Log fragment size (bp)` =  log10(DNA_frags$`Fragment size (bp)`))
+
+fit1 <- selm(`Fragment size (bp)` ~ 1, weights = Intensity, data = DNA_frags, family = "SN")
+plot(fit1, which = 4)
+print(fit1@param)
+fit1@param[2:1] %>% 
+  flatten() %>% 
+  enframe() %>% 
+  unnest(cols = c(value)) %>% 
+  spread(key = name, value = value) %>% 
+  bind_cols(Sample = Sample_name, .) %>% 
+  bind_rows(dist_params, ., .id = NULL) ->
+  dist_params
+confint(fit1)
+summary(fit1)
+
+# fit2 <- selm(`Fragment size (bp)` ~ 1, weights = Intensity, data = DNA_frags, family = "ST", method = "MPLE")
+# print(fit2@param)
+# 
+# fit3 <- selm(`Log fragment size (bp)` ~ 1, weights = Intensity, data = DNA_frags, family = "SN")
+# plot(fit3, which = 4)
+# print(fit3@param)
+# 
+# fit4 <- selm(`Log fragment size (bp)` ~ 1, weights = Intensity, data = DNA_frags, family = "ST")
+# print(fit4@param)
+
+# fitted data based on models
+rsamp1 <- data.frame(sn = rsn(fit1, dp = coef(fit1, "DP"),
+                                 n = N / 1.05))
+
+# rsamp2 <- data.frame(st = rsn(fit2, dp = coef(fit2, "DP"), 
+#                               n = N/3)) # ignoring nu because I cannot use it for scipy.skewnorm
+# 
+# # fitted data based on log model
+# rsamp3 <- data.frame(sn = 10^(rsn(fit3, dp = coef(fit3, "DP")[1:3],
+#                               n = N/2)))
+# 
+# rsamp4 <- data.frame(st = 10^(rsn(fit4, dp = coef(fit4, "DP")[1:3],
+#                               n = N/3)))
+# 
+# rsamp5 <- data.frame(st = rsn(xi = coef(fit1, "DP")[1],
+#                               omega = coef(fit1, "DP")[2],
+#                               alpha = -0.4,
+#                               n = N))
+# 
+# 
+# just guessing the params
+# rsamp_guess <- data.frame(gs = rsn(dp = cp2dp(c(6950, 5000, 0.7), "SN"),
+# n = N))
+
+p1 <- plot_fitted_dist(frag_sizes = DNA_frags, mode_sample = rsamp1) + labs(title = "Temperate forest soil I \n Bead beating + phenol") + theme(plot.title = element_text(size = 12))
+print(p1)
+```
+
+## Temperate forest soil II (Bohemian Forest)
+```{r C1 Sumava 2, cache=T}
+# this_max <- 7428 # maximum of peak (if recorded)
+# Fragment_sizes %<>% append(., this_max, after = sum(this_max > .))
+Sample_name <- "Bohemian Forest soil II"
+read_table(paste0(rel_path, "2020-07-13 - 18.32.37_Angel_C1_regions.txt"),
+           col_names = c("Fragment size (bp)", "Intensity"), 
+           skip = 4) %>% 
+  mutate(Intensity = round(Intensity)) -> # weights in selm must be integers
+  DNA_frags
+
+DNA_frags$`Fragment size (bp)` <- Fragment_sizes 
+DNA_frags %>% glimpse
+
+DNA_frags %<>% filter(., `Fragment size (bp)` > 350)
+DNA_frags %<>% filter(., `Fragment size (bp)` < 50000)
+
+fit1 <- selm(`Fragment size (bp)` ~ 1, weights = Intensity, data = DNA_frags, family = "SN")
+plot(fit1, which = 4)
+print(fit1@param)
+fit1@param[2:1] %>% 
+  flatten() %>% 
+  enframe() %>% 
+  unnest(cols = c(value)) %>% 
+  spread(key = name, value = value) %>% 
+  bind_cols(Sample = Sample_name, .) %>% 
+  bind_rows(dist_params, .) ->
+  dist_params
+confint(fit1)
+summary(fit1)
+
+# fitted data based on models
+rsamp1 <- data.frame(sn = rsn(fit1, dp = coef(fit1, "DP"),
+                                 n = N * 1.05))
+
+p2 <- plot_fitted_dist(frag_sizes = DNA_frags, mode_sample = rsamp1) + labs(title = "Temperate forest soil II \n Bead beating + phenol") + theme(plot.title = element_text(size = 12)) 
+print(p2)
+```
+
+## Vienna city soil
+```{r H2 City soil, cache=T}
+# this_max <- 6155 # maximum of peak (if recorded)
+# Fragment_sizes %<>% append(., this_max, after = sum(this_max > .))
+Sample_name <- "Vienna city soil"
+read_table(paste0(rel_path, "2020-07-13 - 18.32.37_Angel_H2_regions.txt"),
+           col_names = c("Fragment size (bp)", "Intensity"), 
+           skip = 4) %>% 
+  mutate(Intensity = round(Intensity)) -> # weights in selm must be integers
+  DNA_frags
+
+DNA_frags$`Fragment size (bp)` <- Fragment_sizes 
+DNA_frags %>% glimpse
+
+DNA_frags %<>% filter(., `Fragment size (bp)` > 350)
+DNA_frags %<>% filter(., `Fragment size (bp)` < 50000)
+# DNA_frags %<>% bind_cols(., `Log fragment size (bp)` =  log10(DNA_frags$`Fragment size (bp)`))
+
+fit1 <- selm(`Fragment size (bp)` ~ 1, weights = Intensity, data = DNA_frags, family = "SN")
+plot(fit1, which = 4)
+print(fit1@param)
+fit1@param[2:1] %>% 
+  flatten() %>% 
+  enframe() %>% 
+  unnest(cols = c(value)) %>% 
+  spread(key = name, value = value) %>% 
+  bind_cols(Sample = Sample_name, .) %>% 
+  bind_rows(dist_params, .) ->
+  dist_params
+confint(fit1)
+summary(fit1)
+
+# fitted data based on models
+rsamp1 <- data.frame(sn = rsn(fit1, dp = coef(fit1, "DP"),
+                                 n = N / 10.5))
+p3 <- plot_fitted_dist(frag_sizes = DNA_frags, mode_sample = rsamp1) + labs(title = "Vienna garden soil \n DNeasy PowerSoil Kit") + theme(plot.title = element_text(size = 12)) 
+print(p3)
+```
+
+## Austrian Gleysol
+```{r G2 Teabag soil, cache=T}
+# this_max <- 7852 # maximum of peak (if recorded)
+# Fragment_sizes %<>% append(., this_max, after = sum(this_max > .))
+Sample_name <- "Austrian Gleysol"
+read_table(paste0(rel_path, "2020-07-13 - 18.32.37_Angel_G2_regions.txt"),
+           col_names = c("Fragment size (bp)", "Intensity"), 
+           skip = 4) %>% 
+  mutate(Intensity = round(Intensity)) -> # weights in selm must be integers
+  DNA_frags
+
+DNA_frags$`Fragment size (bp)` <- Fragment_sizes 
+DNA_frags %>% glimpse
+
+DNA_frags %<>% filter(., `Fragment size (bp)` > 350)
+DNA_frags %<>% filter(., `Fragment size (bp)` < 50000)
+# DNA_frags %<>% bind_cols(., `Log fragment size (bp)` =  log10(DNA_frags$`Fragment size (bp)`))
+
+fit1 <- selm(`Fragment size (bp)` ~ 1, weights = `Intensity`, data = DNA_frags, family = "SN")
+plot(fit1, which = 4)
+print(fit1@param)
+fit1@param[2:1] %>% 
+  flatten() %>% 
+  enframe() %>% 
+  unnest(cols = c(value)) %>% 
+  spread(key = name, value = value) %>% 
+  bind_cols(Sample = Sample_name, .) %>% 
+  bind_rows(dist_params, .) ->
+  dist_params
+confint(fit1)
+summary(fit1)
+
+# fitted data based on models
+rsamp1 <- data.frame(sn = rsn(fit1, dp = coef(fit1, "DP"),
+                                 n = N / 2.3))
+p4 <- plot_fitted_dist(frag_sizes = DNA_frags, mode_sample = rsamp1) + labs(title = "Austrian Gleysol \n DNeasy PowerSoil Kit") + theme(plot.title = element_text(size = 12)) 
+print(p4)
+```
+
+## Arizona desert soil
+```{r H1 Desert Baboquisari, cache=T}
+# this_max <- 6803 # maximum of peak (if recorded)
+# Fragment_sizes %<>% append(., this_max, after = sum(this_max > .))
+Sample_name <- "Arizona desert soil"
+read_table(paste0(rel_path, "2020-07-13 - 18.32.37_Angel_H1_regions.txt"),
+           col_names = c("Fragment size (bp)", "Intensity"), 
+           skip = 4) %>% 
+  mutate(Intensity = round(Intensity)) -> # weights in selm must be integers
+  DNA_frags
+
+DNA_frags$`Fragment size (bp)` <- Fragment_sizes 
+DNA_frags %>% glimpse
+
+DNA_frags %<>% filter(., `Fragment size (bp)` > 350)
+DNA_frags %<>% filter(., `Fragment size (bp)` < 50000)
+# DNA_frags %<>% bind_cols(., `Log fragment size (bp)` =  log10(DNA_frags$`Fragment size (bp)`))
+
+fit1 <- selm(`Fragment size (bp)` ~ 1, weights = Intensity, data = DNA_frags, family = "SN")
+plot(fit1, which = 4)
+print(fit1@param)
+fit1@param[2:1] %>% 
+  flatten() %>% 
+  enframe() %>% 
+  unnest(cols = c(value)) %>% 
+  spread(key = name, value = value) %>% 
+  bind_cols(Sample = Sample_name, .) %>% 
+  bind_rows(dist_params, .) ->
+  dist_params
+confint(fit1)
+summary(fit1)
+
+# fitted data based on models
+rsamp1 <- data.frame(sn = rsn(fit1, dp = coef(fit1, "DP"),
+                                 n = N / 5.2))
+p5 <- plot_fitted_dist(frag_sizes = DNA_frags, mode_sample = rsamp1) + labs(title = "Arizona desert soil \n DNeasy PowerSoil Kit?") + theme(plot.title = element_text(size = 12)) 
+print(p5)
+```
+
+## Arctic permafrost soil
+```{r D4 Arctic soil, cache=T}
+# this_max <- 7641 # maximum of peak (if recorded)
+# Fragment_sizes %<>% append(., this_max, after = sum(this_max > .))
+Sample_name <- "Arctic permafrost soil"
+read_table(paste0(rel_path, "2020-07-13 - 18.32.37_Angel_D4_regions.txt"),
+           col_names = c("Fragment size (bp)", "Intensity"), 
+           skip = 4) %>% 
+  mutate(Intensity = round(Intensity)) -> # weights in selm must be integers
+  DNA_frags
+
+DNA_frags$`Fragment size (bp)` <- Fragment_sizes 
+DNA_frags %>% glimpse
+
+DNA_frags %<>% filter(., `Fragment size (bp)` > 350)
+DNA_frags %<>% filter(., `Fragment size (bp)` < 50000)
+# DNA_frags %<>% bind_cols(., `Log fragment size (bp)` =  log10(DNA_frags$`Fragment size (bp)`))
+
+fit1 <- selm(`Fragment size (bp)` ~ 1, weights = Intensity, data = DNA_frags, family = "SN")
+plot(fit1, which = 4)
+print(fit1@param)
+fit1@param[2:1] %>% 
+  flatten() %>% 
+  enframe() %>% 
+  unnest(cols = c(value)) %>% 
+  spread(key = name, value = value) %>% 
+  bind_cols(Sample = Sample_name, .) %>% 
+  bind_rows(dist_params, .) ->
+  dist_params
+confint(fit1)
+summary(fit1)
+
+# fitted data based on models
+rsamp1 <- data.frame(sn = rsn(fit1, dp = coef(fit1, "DP"),
+                                 n = N / 3.3))
+p6 <- plot_fitted_dist(frag_sizes = DNA_frags, mode_sample = rsamp1) + labs(title = "Arctic permafrost soil \n ?") + theme(plot.title = element_text(size = 12)) 
+print(p6)
+```
+
+## Post-mining reclamation lake periphyton
+```{r B3 Post-mining reclamation lake, cache=T}
+# this_max <- 7920 # maximum of peak (if recorded)
+# Fragment_sizes %<>% append(., this_max, after = sum(this_max > .))
+Sample_name <- "Post-mining reclamation lake periphyton"
+read_table(paste0(rel_path, "2020-07-13 - 18.32.37_Angel_B3_regions.txt"),
+           col_names = c("Fragment size (bp)", "Intensity"), 
+           skip = 4) %>% 
+  mutate(Intensity = round(Intensity)) -> # weights in selm must be integers
+  DNA_frags
+
+DNA_frags$`Fragment size (bp)` <- Fragment_sizes 
+DNA_frags %>% glimpse
+
+DNA_frags %<>% filter(., `Fragment size (bp)` > 350)
+DNA_frags %<>% filter(., `Fragment size (bp)` < 50000)
+
+fit1 <- selm(`Fragment size (bp)` ~ 1, weights = Intensity, data = DNA_frags, family = "SN")
+plot(fit1, which = 4)
+print(fit1@param)
+fit1@param[2:1] %>% 
+  flatten() %>% 
+  enframe() %>% 
+  unnest(cols = c(value)) %>% 
+  spread(key = name, value = value) %>% 
+  bind_cols(Sample = Sample_name, .) %>% 
+  bind_rows(dist_params, .) ->
+  dist_params
+# confint(fit1)
+summary(fit1)
+
+# fitted data based on models
+rsamp1 <- data.frame(sn = rsn(fit1, dp = coef(fit1, "DP"),
+                                 n = N / 4.5))
+p7 <- plot_fitted_dist(frag_sizes = DNA_frags, mode_sample = rsamp1) + labs(title = "Lake periphyton \n DNeasy PowerSoil Kit") + theme(plot.title = element_text(size = 12))
+print(p7)
+```
+
+## Drylands millipede hindgut (*A. syriacus*)
+```{r A2 Millipede (tropical hindgut), cache=T}
+# this_max <- 8218 # maximum of peak (if recorded)
+# Fragment_sizes %<>% append(., this_max, after = sum(this_max > .))
+Sample_name <-"Drylands millipede hindgut"
+read_table(paste0(rel_path, "2020-07-13 - 18.32.37_Angel_A2_regions.txt"),
+           col_names = c("Fragment size (bp)", "Intensity"), 
+           skip = 4) %>% 
+  mutate(Intensity = round(Intensity)) -> # weights in selm must be integers
+  DNA_frags
+
+DNA_frags$`Fragment size (bp)` <- Fragment_sizes 
+DNA_frags %>% glimpse
+
+DNA_frags %<>% filter(., `Fragment size (bp)` > 350)
+DNA_frags %<>% filter(., `Fragment size (bp)` < 50000)
+
+fit1 <- selm(`Fragment size (bp)` ~ 1, weights = Intensity, data = DNA_frags, family = "SN")
+plot(fit1, which = 4)
+print(fit1@param)
+fit1@param[2:1] %>% 
+  flatten() %>% 
+  enframe() %>% 
+  unnest(cols = c(value)) %>% 
+  spread(key = name, value = value) %>% 
+  bind_cols(Sample = Sample_name, .) %>% 
+  bind_rows(dist_params, .) ->
+  dist_params
+confint(fit1)
+summary(fit1)
+
+# fitted data based on models
+rsamp1 <- data.frame(sn = rsn(fit1, dp = coef(fit1, "DP"),
+                                 n = N / 1.6))
+
+p8 <- plot_fitted_dist(frag_sizes = DNA_frags, mode_sample = rsamp1) + labs(title = "Tropical millipede \n FastDNA Spin Kit for Soil") + theme(plot.title = element_text(size = 12)) 
+print(p8)
+```
+
+## European millipede hindgut (*G. connexa*)
+```{r B2 Millipede (European hindgut), cache=T}
+# this_max <- 9447 # maximum of peak (if recorded)
+# Fragment_sizes %<>% append(., this_max, after = sum(this_max > .))
+Sample_name <- "European millipede hindgut"
+read_table(paste0(rel_path, "2020-07-13 - 18.32.37_Angel_B2_regions.txt"),
+           col_names = c("Fragment size (bp)", "Intensity"), 
+           skip = 4) %>% 
+  mutate(Intensity = round(Intensity)) -> # weights in selm must be integers
+  DNA_frags
+
+DNA_frags$`Fragment size (bp)` <- Fragment_sizes 
+DNA_frags %>% glimpse
+
+DNA_frags %<>% filter(., `Fragment size (bp)` > 350)
+DNA_frags %<>% filter(., `Fragment size (bp)` < 50000)
+
+fit1 <- selm(`Fragment size (bp)` ~ 1, weights = Intensity, data = DNA_frags, family = "SN")
+plot(fit1, which = 4)
+print(fit1@param)
+fit1@param[2:1] %>% 
+  flatten() %>% 
+  enframe() %>% 
+  unnest(cols = c(value)) %>% 
+  spread(key = name, value = value) %>% 
+  bind_cols(Sample = Sample_name, .) %>% 
+  bind_rows(dist_params, .) ->
+  dist_params
+confint(fit1)
+summary(fit1)
+
+# fitted data based on models
+rsamp1 <- data.frame(sn = rsn(fit1, dp = coef(fit1, "DP"),
+                                 n = N * 1.7))
+
+p9 <- plot_fitted_dist(frag_sizes = DNA_frags, mode_sample = rsamp1) + labs(title = "European millipede \n FastDNA Spin Kit for Soil") + theme(plot.title = element_text(size = 12)) 
+print(p9)
+```
+
+## Summary
+```{r Summary, fig.show = 'hide', cache=T, fig.width=12, fig.height=14, out.width = '1000px'}
+
+colnames(dist_params) <- c("Sample", "Mean", "SD", "Gamma", "Xi", "Omega", "Alpha")
+dist_params %>% 
+  kable(., digits = c(1, 1, 4)) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), 
+                full_width = F)
+
+dist_params %>% 
+  filter(., Sample != "Post-mining reclamation lake periphyton") %>% # outlier
+  select(-Sample) %>% 
+  summarise(Mean = mean(Mean), SD = sqrt(mean(SD^2)), Gamma = mean(Gamma),
+            Xi = mean(Xi), Omega = sqrt(mean(Omega^2)), Alpha = mean(Alpha)) %>% 
+  kable(., digits = c(1, 1, 4), caption = "Mean distribution") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), 
+                full_width = F)
+  
+p.file <- "Distribution_fit_summary"
+dist_fit_sum <- p1 + p2 + theme(legend.position = "none") + p3 + theme(legend.position = "none") + p4 + theme(legend.position = "none") + p5 + theme(legend.position = "none") + p6 + theme(legend.position = "none") + p7 + theme(legend.position = "none") + p8 + theme(legend.position = "none") + p9 + theme(legend.position = "none") +  plot_layout(ncol = 3)
+
+dist_fit_sum 
+svglite(paste0("Fit_selm_figs/", p.file, ".svg"), width = 12, height = 14)
+print(dist_fit_sum )
+dev.off()
+
+gz(paste0("Fit_selm_figs/", p.file, ".svg"), paste0("Fit_selm_figs/", p.file, ".svgz"))
+```
+
+```{r colophon, eval=T}
+sessioninfo::session_info() %>%
+  details::details(
+    summary = 'Current session info',
+    open    = TRUE
+ )
+```
